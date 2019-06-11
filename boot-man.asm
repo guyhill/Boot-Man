@@ -28,7 +28,7 @@
 ;
 ; * Power pills function differently from the original. When Boot-Man eats a power pill, all ghosts become
 ;   ethereal (represented in game by just their eyes being visible) and cease to chase Boot-Man. While ethereal,
-;   ghosts can be run through with no ill effects. While I would really like to include the "ghost eating"
+;   Boot-Man can walk through ghosts with no ill effects. While I would really like to include the "ghost hunting"
 ;   from the original, which I consider to be an iconic part of the game, this simply isn't possible in the little
 ;   space available.
 ;
@@ -85,7 +85,7 @@ start:
     int 0x10
 
 
-    cld                             ; Clear the direction flag. We use x86 string instructions a lot as they have one-byte codes
+    cld                             ; Clear the direction flag. We use string instructions a lot as they have one-byte codes
     mov ax, 0xb800
     mov es, ax                      ; Set up the es segment to point to video RAM
 
@@ -113,13 +113,13 @@ buildmaze:
 .maze_innerloop:
     shl ax, 1                       ; shift out a single bit to determine whether a wall or dot must be shown
     push ax
-    mov ax, 0x01db                  ; Assume it is a wall character (blue solid block)
+    mov ax, 0x01db                  ; Assume it is a wall character (0x01: blue; 0xdb: full solid block)
     jc .draw                        ; Draw the character if a 1 was shifted out
-    mov ax, 0x0ff9                  ; otherwise, assume a food character (white bullet)
+    mov ax, 0x0ff9                  ; otherwise, assume a food character (0x0f: white; x0f9: bullet)
     cmp di, dx                      ; See if instead of food we need to draw a power pill
     jnz .draw                       
     mov dh, 0x00                    ; Update powerpill address to draw remaining powerpills
-    mov al, 0x04                    ; powerpill character (white diamond - no need to set up colour once more)
+    mov al, 0x04                    ; powerpill character (0x04: diamond - no need to set up colour again)
 .draw:
     stosw                           ; Store character + colour in video ram
     push di
@@ -154,7 +154,8 @@ buildmaze:
 ;              in their new positions. Collisions between Boot-Man and the ghosts are checked
 ;              before and after ghost movement. We need to detect for collisions twice, because
 ;              if you only check once, Boot-Man can change position with a ghost without colliding
-;              (in the original, it is possible in some circumstances to actually do this). 
+;              (in the original, collisions are checked only once, and as a consequence, it is 
+;              possible in some circumstances to actually move Pac-Man through a ghost). 
 ;-----------------------------------------------------------------------------------------------------
 int8handler:
     pusha
@@ -163,9 +164,9 @@ int8handler:
     dec byte [si + pace_offset]     ; Decrease the pace counter. The pace counter determines the overall
                                     ; speed of the game. We found that moving at a speed of 6 per second
                                     ; gives good speed and control, so we use a counter to only move
-                                    ; once for every three time that the interrupt fires.
+                                    ; once for every three times that the interrupt fires.
                                     ; We also use the pace counter to include longer delays at game start
-                                    ; and after Boot-Man dies.
+                                    ; and after Boot-Man dies, by intitalizing the counter with higher values.
 jump_offset: equ $ + 1                
     jz .move_all                    ; If the pace counter is not 0, we immediately finish.
     popa                            ; The offset of this jump gets overwritten when boot-man dies
@@ -176,11 +177,12 @@ jump_offset: equ $ + 1
     mov ax, 0x0201                  ; al = number of sectors to read
     mov cx, 0x0001                  ; cx / dh : CHS of sector to read. In this case we read sector 1, the MBR.
 bootdrive: equ $ + 1
-    mov dx, 0x0080                  ; dl = disk number to read from. The actual byte gets updated with the actual 
+    mov dx, 0x0080                  ; dl = disk number to read from. This code gets updated with the actual 
                                     ; number of the boot disk at program start.
     mov bx, 0x7c00
     int 0x13                        ; int 0x13 / ah = 2: read one or more sectors from storage medium
-    jmp start                       ; Go back to the top once read is complete. This re-inits all modified code and data
+    jmp start                       ; Go back to the top once read is complete. This re-inits all 
+                                    ; modified code and data
 
 .move_all:
     mov byte [si + pace_offset], 0x3; Reset the pace counter.
@@ -233,9 +235,9 @@ bootdrive: equ $ + 1
 ;      4 | green        | 4 squares to the right of Boot-Man
 ;
 ; There's two different reasons for having slightly different AI for each ghost:
-; (1) If all ghosts have the same AI they tend to bunch together and stay there. With the current AI 
+; (1) If all ghosts have the same AI they tend to bunch together and stay there. With the current AI, 
 ;     ghosts will sometimes bunch together, but they will split apart eventually
-; (2) With this set of ghosts, they tend to surround Boot-Man, making it harder for the player
+; (2) With this setup, the ghosts tend to surround Boot-Man, making it harder for the player
 ; 
 ; When Boot-Man picks up a power pill, a timer starts running, and ghosts become ethereal.
 ; As long as the ghosts are ethereal, the 
@@ -321,20 +323,18 @@ bootdrive: equ $ + 1
 
 .ghostterrain_loop:                         ; Second loop through all the ghosts, to determine terrain
                                             ; underneath each one. This is used in the next movement phase
-                                            ; to restore the terrain.
+                                            ; to restore the terrain underneath the ghosts.
                                             ; Note that this "terrain storing" approach can trigger a bug
                                             ; if Boot-Man and a ghost share a position. In that case
-                                            ; an extra Boot-Man character will be drawn on screen.
-    mov dx, [bx + si +                      ;
-                gh_offset_pos + gh_length]  ; dx = updated ghost position
+                                            ; an extra Boot-Man character may be drawn on screen.
+    mov dx, [bx + si + gh_offset_pos + gh_length]  ; dx = updated ghost position
     cmp dx, [si]                            ; compare dx with Boot-Man's position
     jne .skip_collision                     ; and if they coincide,
-    mov [si + collision_offset], al         ; set the collision detect flag to a positive value.
+    mov [si + collision_offset], al         ; set the collision detect flag to a non-zero value.
 .skip_collision:
     call get_screenpos                      ; find the address in video ram of the updated ghost position,
     mov ax, [es:di]                         ; store its content in ax
-    mov [bx + si + 
-        gh_offset_terrain + gh_length], ax  ; and copy it to ghostterrain
+    mov [bx + si + gh_offset_terrain + gh_length], ax  ; and copy it to ghostterrain
     add bx, gh_length                       ; go to next ghost
     cmp bx, 3 * gh_length + bm_length       ; and determine if it is the final ghost
     jnz .ghostterrain_loop
@@ -355,7 +355,6 @@ bootdrive: equ $ + 1
     mov ax, 0x0e0f                          ; Dead boot-man: 0x0e = black background, yellow foreground
                                             ; 0x0f = 8 pointed star
     call paint
-.halt:
     add byte [si + pace_offset], bl         ; Update pace counter: this introduces a small period of mourning 
                                             ; after Boot-Man's death. 
                                             ; It was 3, and bl = 0x1b at this point, so it becomes 0x1e
@@ -389,7 +388,7 @@ bootdrive: equ $ + 1
 
 
 ;-----------------------------------------------------------------------------------------------------
-; newpos: calculates a new position, starting from a position in dx and movement direction in al
+; newpos: calculates a new position, starting from a position in dx and movement direction in al.
 ;         dl contains the x coordinate, while dh contains the y coordinate. The movement directions
 ;         in al are as follows:
 ;         0xc2: move right
