@@ -256,16 +256,16 @@ bootdrive: equ $ + 1
     mov byte [si + collision_offset], bh    ; Reset collision detection. BH happens to be 0 at this point
 .ghost_ai_outer:
     mov bp, 0xffff                          ; bp = minimum distance; start out at maxint
-    mov al, 0xce                            ; al = current directions being tried. Doubles as loop counter
-                                            ; over all directions.
-                                            ; Values are the same as those used by the newpos routine
     mov ah, [bx + si]                       ; ah will become the forbidden movement direction. We start
                                             ; with the current direction, which is forbidden if Boot-Man
                                             ; just ate a power pill
     cmp byte [si + timer_offset], 0x20      ; If timer_offset == 0x20, Boot-Man just picked up a power pill
-    jz .reverse                             ; so in that case we do not flip the direction
+    jz .reverse                             ; so in that case we do not flip the direction.
     xor ah, 8                               ; Flip the current direction to obtain the forbidden direction in ah
 .reverse:
+    mov al, 0xce                            ; al = current directions being tried. Doubles as loop counter
+                                            ; over all directions.
+                                            ; Values are the same as those used by the newpos routine
     mov dx, [bx + si + gh_offset_pos]       ; dx = current ghost position
     cmp dx, [si]                            ; compare dx with Boot-Man position
     jne .ghost_ai_loop                      ; If they are equal,
@@ -342,12 +342,12 @@ bootdrive: equ $ + 1
     ; Test if ghosts are invisible
     mov ax, 0x2fec                          ; Assume ghost is visible: 0x2f = purple background, white text
                                             ; 0xec = infinity symbol = ghost eyes 
-    mov cx, 0x0010                          ; cl = difference in colour between successive ghosts
+    mov cl, 0x10                            ; cl = difference in colour between successive ghosts
                                             ; ch is set to zero as that leads to smaller code
-    cmp byte [si + timer_offset], ch        ; See if ghost timer is running
+    cmp byte [si + timer_offset], bh        ; See if ghost timer is running (note bh is still zero at this point)
     jnz .ghosts_invisible                   ; If it is, ghosts are ethereal
 
-    cmp byte [si + collision_offset], ch    ; Ghosts are visible, so test for collisions
+    cmp byte [si + collision_offset], bh    ; Ghosts are visible, so test for collisions
     jz .no_collision
 
     ; Ghosts are visible and collide with boot-man, therefore boot-man is dead
