@@ -356,7 +356,8 @@ bootdrive: equ $ + 1
                                             ; 0x0f = 8 pointed star
     call paint
 .halt:
-    add byte [si + pace_offset], bl         ; Update pace counter for a small period of mourning for Boot-Man. 
+    add byte [si + pace_offset], bl         ; Update pace counter: this introduces a small period of mourning 
+                                            ; after Boot-Man's death. 
                                             ; It was 3, and bl = 0x1b at this point, so it becomes 0x1e
     mov byte [jump_offset], 2               ; Modify the pace code at the start of this handler, to jump to the
                                             ; code that re-loads the MBR and re-starts the game
@@ -387,36 +388,86 @@ bootdrive: equ $ + 1
     jmp intxhandler_end
 
 
+;-----------------------------------------------------------------------------------------------------
+; newpos: calculates a new position, starting from a position in dx and movement direction in al
+;         dl contains the x coordinate, while dh contains the y coordinate. The movement directions
+;         in al are as follows:
+;         0xc2: move right
+;         0xc6: move down
+;         0xca: move left
+;         0xce: move up
+;
+; The reason for these fairly strange values is that they form the 2nd byte (the ModR/M byte)
+; of the instruction updating the position: 
+; inc dl (0xfe, 0xc2), inc dh (0xfe), dec dl (0xfe, 0xca), dec dh (0xfe, 0xce)
+; The code first modifies itself to the correct instruction, then executes this instruction. The
+; reason for doing it in this way is that this is a lot shorter than the traditional way of 
+; doing an if / elif / elif / else chain.
+;
+; Immediately after calculating the new position we also determine the address in video RAM 
+; corresponding to this position. All lines of the screen are stored one after the other in RAM,
+; starting at 0xb800:0x0000. Since each line has 40 characters, and every character takes up
+; two bytes (one for colour, one for the character code), the equation to calculate video RAM
+; offset from x, y coordinates is as follows:
+; 
+; offset = 2 * (40 * y + x + 4),
+;
+; with the +4 due to the fact that the maze is in the center of the screen, with a 4 character wide
+; border to the left.
+;
+; newpos and get_screenpos used to be two separate functions but since they were almost
+; always called one after the other, combining them saved some bytes of code.
+;-----------------------------------------------------------------------------------------------------
 newpos:
-    mov [.modified_instruction + 1], al
+    mov [.modified_instruction + 1], al     ; Here the instruction to be executed is modified
 .modified_instruction:
-    db 0xfe, 0xc2   ; inc dl in machine code
-                    ; The last byte of this gets overwritten with the value of al before execution.
-                    ; Valid values of al are: 0xc2 (inc dl), 0xc6 (inc dh), 0xca (dec dl), 0xce (dec dh).
-                    ; These values correspond to moving right, down, left and up, respectively.
-    and dl, 0x1f    ; Deal with tunnels
+    db 0xfe, 0xc2                           ; inc dl in machine code
+    and dl, 0x1f                            ; Deal with tunnels
 get_screenpos:
     push dx
-    movzx di, dh
-    imul di, di, 0x28
-    mov dh, 0
-    add di, dx
-    shl di, 1
-    add di, 8
+    movzx di, dh                            ; di = y coordinate
+    imul di, di, 0x28                       ; multiply di by 0x28 = 40 decimal, the screen width
+    mov dh, 0                               ; After this, dx contains the x coordinate
+    add di, dx                              ; di = y * 40 + x
+    add di, 4                               ; Skip the left border by adding 4 to di
+    shl di, 1                               ; Multiply di by 2
     pop dx
-    cmp byte [es:di], 0xdb
+    cmp byte [es:di], 0xdb                  ; Check to see if the new position collides with a wall
+                                            ; 0xdb = full block character that makes up the wall
     ret
 
-
+;-----------------------------------------------------------------------------------------------------
+; paint: paints a character on screen at given x, y coordinates in dx
+;        simple convenience function that gets called enough to be actually worth it, in terms
+;        of code length.
+;-----------------------------------------------------------------------------------------------------
 paint:
-    call get_screenpos
-    stosw
+    call get_screenpos                      ; Convert x, y coordinates in dx to video memory address
+    stosw                                   ; stosw = shorter code for mov [es:di], ax
+                                            ; stosw also adds 2 to di, but that effect is ignored here
     ret
 
 
+;-----------------------------------------------------------------------------------------------------
+; int9handler: the keyboard handler. It converts the scancodes for WASD into valid movement 
+;              directions, as described in the comment block above the newpos function.
+;              We perform some bit wrangling to convert one into the other. This used to be
+;              a simple if / elif / elif / else construction, but this bit-wrangling code is
+;              much shorter, albeit much more obscure.
+;              In the hope of documenting how this works, the comments show how these scancodes
+;              are modified step by step into valid movement directions.
+;
+;              The reason that this works at all is that, coincidentally, WASD are in order of scancode,
+;              (which is not a coincidence, as these scancodes reflect the geometry of the original
+;              IBM PC keyboards), and that the lowest 2 bits of these are different for all 4.
+;              Unfortunately, they are ordered in the wrong way: scancodes ascend while movement
+;              directions descend. Therefore an extra minus sign is needed somewhere, which is
+;              provided by the neg instruction.
+;-----------------------------------------------------------------------------------------------------
 int9handler:
     pusha
-    in al, 0x60
+    in al, 0x60                 ; We use the legacy I/O port for the keyboard. This code 
+                                ; would also work in an IBM PC from almost 40 years ago
 
     ; This code converts al from scancode to movement direction.
     ; Input:  0x11 (W),  0x1e (A),     0x1f (S),    0x20 (D)
@@ -425,63 +476,67 @@ int9handler:
     ; Other scancodes below 0x21 are also mapped onto a movement direction
     ; Starting input:             0x11 0x1e 0x1f 0x20
     sub al, 0x21                ; 0xf0 0xfd 0xfe 0xff
-    jnc intxhandler_end         ;                      if al >= 0x21, ignore scancode
+    jnc intxhandler_end         ;                      if al >= 0x21, ignore scancode;
+                                ;                      this includes key release events
     and al, 3                   ; 0x00 0x01 0x02 0x03
     shl al, 2                   ; 0x00 0x04 0x08 0x0c
     neg al                      ; 0x00 0xfc 0xf8 0xf4
     add al, 0xce                ; 0xce 0xca 0xc6 0xc2
-    cmp al, [bootman_data + 2]
+    cmp al, [bootman_data + 2]  ; If the new direction is the same as the current direction, ignore it
     jz intxhandler_end
-    mov [bootman_data + 3], al
+    mov [bootman_data + 3], al  ; Set new direction to the direction derived from the keyboard input
 intxhandler_end:
     popa
     iret
 
 bootman_data:
-    db 0x0f, 0x0f   ; boot-man's x and y position
-    db 0xca         ; boot-man's direction
-    db 0xca         ; boot-man's future direction
+    db 0x0f, 0x0f               ; Boot-Man's x and y position
+    db 0xca                     ; Boot-Man's direction
+    db 0xca                     ; Boot-Man's future direction
 
 pace_counter: db 0x10
-ghost_timer: db 0x0 ; if > 0 ghosts are invisible, and is counted backwards to 0
+ghost_timer:  db 0x0            ; if > 0 ghosts are invisible, and is counted backwards to 0
 
 ghostdata:
-    db 0xc2        ; 1st ghost, direction
+    db 0xc2                     ; 1st ghost, direction
 ghostpos:
-    db 0x01, 0x01  ;            x and y position
+    db 0x01, 0x01               ;            x and y position
 ghostterrain:
-    dw 0x0ff9      ;            terrain underneath
+    dw 0x0ff9                   ;            terrain underneath
 ghostfocus:
-    db 0x0, 0x0    ;            focus point for movement
+    db 0x0, 0x0                 ;            focus point for movement
 secondghost:
-    db 0xce        ; 2nd ghost, direction
-    db 0x01, 0x17  ;            x and y position
-    dw 0x0ff9      ;            terrain underneath
-    db 0x0, 0x4
-    db 0xca        ; 3rd ghost, direction
-    db 0x1e, 0x01  ;            x and y position
-    dw 0x0ff9      ;            terrain underneath
-    db 0xfc, 0x0
-    db 0xce        ; 4th ghost, direction
-    db 0x1e, 0x17  ;            x and y position
-    dw 0x0ff9      ;            terrain underneath
-    db 0x4, 0x0
+    db 0xce                     ; 2nd ghost, direction
+    db 0x01, 0x17               ;            x and y position
+    dw 0x0ff9                   ;            terrain underneath
+    db 0x0, 0x4                 ;            focus point for movement
+    db 0xca                     ; 3rd ghost, direction
+    db 0x1e, 0x01               ;            x and y position
+    dw 0x0ff9                   ;            terrain underneath
+    db 0xfc, 0x0                ;            focus point for movement
+    db 0xce                     ; 4th ghost, direction
+    db 0x1e, 0x17               ;            x and y position
+    dw 0x0ff9                   ;            terrain underneath
+    db 0x4, 0x0                 ;            focus point for movement
 lastghost:
 
-bm_length           equ ghostdata - bootman_data
+bm_length           equ ghostdata    - bootman_data
 gh_length           equ secondghost  - ghostdata
 gh_offset_pos       equ ghostpos     - ghostdata
 gh_offset_terrain   equ ghostterrain - ghostdata
 gh_offset_focus     equ ghostfocus   - ghostdata
 pace_offset         equ pace_counter - bootman_data
-timer_offset        equ ghost_timer - bootman_data
+timer_offset        equ ghost_timer  - bootman_data
 
+; The maze, as a bit array. Ones denote walls, zeroes denote food dots / corridors
+; The maze is stored upside down to save one cmp instruction in buildmaze
 maze: dw 0xffff, 0x8000, 0xbffd, 0x8081, 0xfabf, 0x8200, 0xbefd, 0x8001
       dw 0xfebf, 0x0080, 0xfebf, 0x803f, 0xaebf, 0xaebf, 0x80bf, 0xfebf
       dw 0x0080, 0xfefd, 0x8081, 0xbebf, 0x8000, 0xbefd, 0xbefd, 0x8001
       dw 0xffff
 maze_length: equ $ - maze
 
+; Collision detection flag. It is initialized by the code
 collision_detect:
 
 collision_offset equ collision_detect - bootman_data
