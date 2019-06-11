@@ -28,7 +28,7 @@
 ;
 ; * Power pills function differently from the original. When Boot-Man eats a power pill, all ghosts become
 ;   ethereal (represented in game by just their eyes being visible) and cease to chase Boot-Man. While ethereal,
-;   Boot-Man can run through ghosts with no ill effects. While I would really like to include the "ghost eating"
+;   ghosts can be run through with no ill effects. While I would really like to include the "ghost eating"
 ;   from the original, which I consider to be an iconic part of the game, this simply isn't possible in the little
 ;   space available.
 ;
@@ -109,7 +109,7 @@ buildmaze:
     mov cx, 0x003c                  ; The distance between a character in the maze and its 
                                     ; symmetric counterpart. Also functions as loop counter
     lodsw                           ; Read 16 bits from the bit array, which represents one
-                                    ; 32 character-wide row from the maze
+                                    ; 32 character-wide row of the maze
 .maze_innerloop:
     shl ax, 1                       ; shift out a single bit to determine whether a wall or dot must be shown
     push ax
@@ -144,161 +144,244 @@ buildmaze:
                                     ; being that it is so short.
 
 
+;-----------------------------------------------------------------------------------------------------
+; int8handler: The main loop of the game. Tied to int 8 (the timer interrupt, which fires 18x per 
+;              second by default), to ensure that the game runs at the same speed on all machines
+;
+;              The code first updates Boot-Man's position according to its movement direction
+;              and keyboard input. Then the ghost AI is run, to determine the ghosts' movement
+;              direction and update their position. Finally, Boot-Man and the ghosts are drawn
+;              in their new positions. Collisions between Boot-Man and the ghosts are checked
+;              before and after ghost movement. We need to detect for collisions twice, because
+;              if you only check once, Boot-Man can change position with a ghost without colliding
+;              (in the original, it is possible in some circumstances to actually do this). 
+;-----------------------------------------------------------------------------------------------------
 int8handler:
     pusha
-    mov si, bootman_data
-    dec byte [si + pace_offset]
-jump_size: equ $ + 1                
-    jz .move_all                    ; This jump offset is overwritten when boot-man dies
-    popa
+    mov si, bootman_data            ; Use si as a pointer to the game data. This reduces byte count of the code:
+                                    ; mov reg, [address] is a 4 byte instruction, while mov reg, [si] only has 2.
+    dec byte [si + pace_offset]     ; Decrease the pace counter. The pace counter determines the overall
+                                    ; speed of the game. We found that moving at a speed of 6 per second
+                                    ; gives good speed and control, so we use a counter to only move
+                                    ; once for every three time that the interrupt fires.
+                                    ; We also use the pace counter to include longer delays at game start
+                                    ; and after Boot-Man dies.
+jump_offset: equ $ + 1                
+    jz .move_all                    ; If the pace counter is not 0, we immediately finish.
+    popa                            ; The offset of this jump gets overwritten when boot-man dies
     iret
 
     push ds                         ; The new offset points here.
     pop es                          ; This code reloads the MBR and jumps back to the start
-    mov ax, 0x0201
-    mov cx, 0x0001
+    mov ax, 0x0201                  ; al = number of sectors to read
+    mov cx, 0x0001                  ; cx / dh : CHS of sector to read. In this case we read sector 1, the MBR.
 bootdrive: equ $ + 1
-    mov dx, 0x0080
+    mov dx, 0x0080                  ; dl = disk number to read from. The actual byte gets updated with the actual 
+                                    ; number of the boot disk at program start.
     mov bx, 0x7c00
-    int 0x13
-    jmp start
+    int 0x13                        ; int 0x13 / ah = 2: read one or more sectors from storage medium
+    jmp start                       ; Go back to the top once read is complete. This re-inits all modified code and data
 
 .move_all:
-    mov byte [si + pace_offset], 0x3
-
-    ; Move boot-man
-    mov al, [si + 3]
-    mov dx, [si]
-    call newpos
-    jz .nodirchange
-    mov [si + 2], al
+    mov byte [si + pace_offset], 0x3; Reset the pace counter.
+;-----------------------------------------------------------------------------------------------------
+; Move Boot-Man
+;-----------------------------------------------------------------------------------------------------
+    mov al, [si + 3]                ; al = new movement direction, as determined by keyboard input
+    mov dx, [si]                    ; dx = current position of Boot-Man
+    call newpos                     ; Update dx to move 1 square in the direction indicated by al
+                                    ; newpos also checks for collisions with walls (in which case ZF is set)
+    jz .nodirchange                 ; ZF indicates that new position collides with wall. We therefore try to keep
+                                    ; moving in the current direction instead.
+    mov [si + 2], al                ; If there's no collision, update the current movement direction
 .nodirchange:
-    mov al, [si + 2]
-    mov dx, [si]
-    call newpos   
-    jz .endbootman
+    mov al, [si + 2]                ; al = current movement direction
+    mov dx, [si]                    ; dx = current position of Boot-Man
+    call newpos                     ; Update dx to move 1 square in direction al
+    jz .endbootman                  ; If there's a wall there, do nothing
 .move:
-    mov ax, 0x0f20
-    cmp byte [es:di], 0x04       ; Detect power pill
-    jnz .nopowerpill
-    mov byte [si + timer_offset], al
+    mov ax, 0x0f20                  ; Prepare to remove Boot-Man from screen, before drawing it in the new position
+                                    ; 0x0f = black background, white foreground; 0x20 = space character
+    cmp byte [es:di], 0x04          ; Detect power pill
+    jnz .nopowerpill                
+    mov byte [si + timer_offset], al; If Boot-Man just ate a power pill, set up the ghost timer to 0x20. We use al here
+                                    ; as it accidentally contains 0x20, and this is one byte shorter than having an 
+                                    ; explicit constant.
 .nopowerpill:
-    xchg dx, [si]
-    call paint
+    xchg dx, [si]                   ; Retrieve current position and store new position
+    call paint                      ; Actually remove Boot-Man from the screen
 .endbootman:
-
-    ; ghost AI
-    mov bx, 3 * gh_length + bm_length
-    mov byte [si + collision_offset], bh    ; bh = 0 at this point
+;-----------------------------------------------------------------------------------------------------
+; ghost AI and movement
+; 
+; Determine the new movement direction for each ghost. Ghost movement direction is determined by
+; the following rule:
+; (1) Every ghost must keep moving
+; (2) It is forbidden for ghosts to suddenly start moving backwards. Unless Boot-Man just consumed 
+;     a powerpill, in which case ghosts are forbidden from continuing in the direction they were going
+; (3) Whenever a ghost has multiple movement options (i.e., it is at a crossroads), try moving 1 space
+;     in each direction that is allowed, and calculate the distance to the target location after 
+;     that move. Choose the direction for which this distance is lowest as the new movement direction
+;
+; During normal movement, ghosts target a position that is related to the position of Boot-Man, as follows:
+; 
+; number | ghost colour | target
+; -------+--------------+-------------------
+;      1 | purple       | bootman's position
+;      2 | red          | 4 squares below Boot-Man
+;      3 | cyan         | 4 squares to the left of Boot-Man
+;      4 | green        | 4 squares to the right of Boot-Man
+;
+; There's two different reasons for having slightly different AI for each ghost:
+; (1) If all ghosts have the same AI they tend to bunch together and stay there. With the current AI 
+;     ghosts will sometimes bunch together, but they will split apart eventually
+; (2) With this set of ghosts, they tend to surround Boot-Man, making it harder for the player
+; 
+; When Boot-Man picks up a power pill, a timer starts running, and ghosts become ethereal.
+; As long as the ghosts are ethereal, the 
+; ghosts will not chase Boot-Man. Instead they will use the center of the big rectangular block
+; in the middle of the maze as their target. They cannot reach it, obviously, so the result is 
+; that they will keep circling this block for as long as the timer runs.
+;
+; This AI is related to, but not the same as, the AI actually used in Pac-Man. The red Pac-Man ghost
+; uses Pac-Man itself as target, same as my purple ghost, while the pink Pac-Man ghost will 
+; target 4 squares ahead of Pac-Man, in the direction Pac-Man is currently moving. The other ghosts' 
+; movement is a bit more complex than that. I had to simplify the AI because of the limited code size.
+;-----------------------------------------------------------------------------------------------------
+    mov bx, 3 * gh_length + bm_length       ; Set up offset to ghost data. With this, si + bx is a 
+                                            ; pointer to the data from the last ghost. Also used as 
+                                            ; loop counter to loop through all the ghosts  
+    mov byte [si + collision_offset], bh    ; Reset collision detection. BH happens to be 0 at this point
 .ghost_ai_outer:
-    mov bp, 0xffff          ; bp = minimum distance; start out at maxint
-    mov al, 0xce
-    mov ah, [bx + si]       ; ah contains the forbidden direction. The forbidden dir is backwards, unless 
-                            ; boot-man just picked up a powerpill, in which case the current dir is forbidden
-    cmp byte [si + timer_offset], 0x20
-    jz .reverse
-    xor ah, 8               ; Flip the current direction to obtain the forbidden one
+    mov bp, 0xffff                          ; bp = minimum distance; start out at maxint
+    mov al, 0xce                            ; al = current directions being tried. Doubles as loop counter
+                                            ; over all directions.
+                                            ; Values are the same as those used by the newpos routine
+    mov ah, [bx + si]                       ; ah will become the forbidden movement direction. We start
+                                            ; with the current direction, which is forbidden if Boot-Man
+                                            ; just ate a power pill
+    cmp byte [si + timer_offset], 0x20      ; If timer_offset == 0x20, Boot-Man just picked up a power pill
+    jz .reverse                             ; so in that case we do not flip the direction
+    xor ah, 8                               ; Flip the current direction to obtain the forbidden direction in ah
 .reverse:
-    mov dx, [bx + si + gh_offset_pos]
-    cmp dx, [si]            ; collision detection
-    jne .ghost_ai_loop
-    mov [si + collision_offset], al
+    mov dx, [bx + si + gh_offset_pos]       ; dx = current ghost position
+    cmp dx, [si]                            ; compare dx with Boot-Man position
+    jne .ghost_ai_loop                      ; If they are equal,
+    mov [si + collision_offset], al         ; We store a non-zero value in the collision_detect flag
+                                            ; We use al here as we know it to be non-zero, and this reduces
+                                            ; code size compared to using a literal constant.
 .ghost_ai_loop:
     push dx
-    cmp al, ah
-    jz .next
-    call newpos
-    jz .next
-    mov cx, 0x0c10
-    cmp byte [si + timer_offset], bh        ; bh = 0 throughout this loop
-    jnz .skip_target
-    mov cx, [si]            ; Target postion for AI
-    add cx, [bx + si + gh_offset_focus]
+    cmp al, ah                              ; If the current direction is the forbidden direction
+    jz .next                                ; we continue with the next direction
+    call newpos                             ; Update ghost position and check if it collides with a wall
+    jz .next                                ; if so, we continue with the next direction
+    mov cx, 0x0c10                          ; Target position if ghosts are ethereal. Position 0x0c10 
+                                            ; (x = 0x10, y = 0x0c) is in the center of the maze.
+    cmp byte [si + timer_offset], bh        ; See if ghost timer runs. We compare with bh, which is known to be 0.
+    jnz .skip_target                        ; If ghost timer runs, we use the aforementioned target position
+    mov cx, [si]                            ; Otherwise we use Boot-Man's current position,
+    add cx, [bx + si + gh_offset_focus]     ; Updated with an offset that is different for each ghost
 .skip_target:
-    ; Calculate distance between new position and boot-man
+;-----------------------------------------------------------------------------------------------------
+; get_distance: Calculate distance between positions in cx (target position) and dx (ghost position)
+;               This used to be a function, but I inlined it to save some space.
+;               The square of the distance between the positions in cx and dx is calculated,
+;               according to Pythagoras' theorem.
+;-----------------------------------------------------------------------------------------------------
     push ax
-    sub cl, dl              ; Calculate delta_x
-    sub ch, dh              ; Calculate delta_y
+    sub cl, dl                              ; after this, cl contains the horizontal difference
+    sub ch, dh                              ; and ch the vertical difference
 
     movsx ax, cl
-    imul ax, ax             ; ax = delta_x^2
+    imul ax, ax                             ; ax = square of horizontal difference
     movsx cx, ch       
-    imul cx, cx             ; cx = delta_y^2
+    imul cx, cx                             ; cx = square of vertical difference
 
-    add cx, ax              ; cx = distance between positions in cx and dx
+    add cx, ax                              ; cx = distance squared between positions in cx and dx
     pop ax
 
-    ; Find out if distance is less than current minimum distance
-    cmp cx, bp
-    jnc .next
-    mov bp, cx              ; new distance is less than distance found up to now
-    mov [bx + si], al       ; hence, we choose this direction to move, for now
-    mov [bx + si + gh_offset_pos], dx   ; Store the provisional new position
+    cmp cx, bp                              ; Compare this distance to the current minimum
+    jnc .next                               ; and if it is,
+    mov bp, cx                              ; update the minimum distance
+    mov [bx + si], al                       ; set the movement direction to the current direction
+    mov [bx + si + gh_offset_pos], dx       ; Store the new ghost position
 .next:
-    pop dx
-    sub al, 4
-    cmp al, 0xc2
+    pop dx                                  ; Restore the current ghost position 
+    sub al, 4                               ; Update the current direction / loop counter
+    cmp al, 0xc2                            
     jnc .ghost_ai_loop
 
-    mov ax, [bx + si + gh_offset_terrain]   ; paint the terrain underneath the ghost at the old ghost position
-    call paint
+    mov ax, [bx + si + gh_offset_terrain]   ; Remove the ghost in the old position from the screen 
+    call paint                              ; by painting the terrain underneath that ghost that was 
+                                            ; determined in the previous movement phase.
+    sub bx, gh_length                       ; Go to the next ghost,
+    jns .ghost_ai_outer                     ; and stop after the final ghost
 
-    sub bx, gh_length
-    jns .ghost_ai_outer
 
-    ; store terrain underneath ghosts
-.ghostterrain_loop:
-    mov dx, [bx + si + gh_offset_pos + gh_length]
-    cmp dx, [si]            ; Collision detect after ghost movement
-    jne .skip_collision
-    mov [si + collision_offset], al
-
+.ghostterrain_loop:                         ; Second loop through all the ghosts, to determine terrain
+                                            ; underneath each one. This is used in the next movement phase
+                                            ; to restore the terrain.
+                                            ; Note that this "terrain storing" approach can trigger a bug
+                                            ; if Boot-Man and a ghost share a position. In that case
+                                            ; an extra Boot-Man character will be drawn on screen.
+    mov dx, [bx + si +                      ;
+                gh_offset_pos + gh_length]  ; dx = updated ghost position
+    cmp dx, [si]                            ; compare dx with Boot-Man's position
+    jne .skip_collision                     ; and if they coincide,
+    mov [si + collision_offset], al         ; set the collision detect flag to a positive value.
 .skip_collision:
-    call get_screenpos
-    mov ax, [es:di]
-    mov [bx + si + gh_offset_terrain + gh_length], ax
-    add bx, gh_length
-    cmp bx, 3 * gh_length + bm_length
+    call get_screenpos                      ; find the address in video ram of the updated ghost position,
+    mov ax, [es:di]                         ; store its content in ax
+    mov [bx + si + 
+        gh_offset_terrain + gh_length], ax  ; and copy it to ghostterrain
+    add bx, gh_length                       ; go to next ghost
+    cmp bx, 3 * gh_length + bm_length       ; and determine if it is the final ghost
     jnz .ghostterrain_loop
 
     ; Test if ghosts are invisible
-    mov ax, 0x2fec
-    mov cx, 0x0010
-    cmp byte [si + timer_offset], ch
-    jnz .ghosts_invisible
+    mov ax, 0x2fec                          ; Assume ghost is visible: 0x2f = purple background, white text
+                                            ; 0xec = infinity symbol = ghost eyes 
+    mov cx, 0x0010                          ; cl = difference in colour between successive ghosts
+                                            ; ch is set to zero as that leads to smaller code
+    cmp byte [si + timer_offset], ch        ; See if ghost timer is running
+    jnz .ghosts_invisible                   ; If it is, ghosts are ethereal
 
-    ; Ghosts are visible, so test for collisions
-    cmp byte [si + collision_offset], ch
+    cmp byte [si + collision_offset], ch    ; Ghosts are visible, so test for collisions
     jz .no_collision
 
     ; Ghosts are visible and collide with boot-man, therefore boot-man is dead
-    mov dx, [si]
-    mov ax, 0x0e0f          ; Dead boot-man (yellow 8 pointed star)
+    mov dx, [si]                            ; dx = current Boot-Man position
+    mov ax, 0x0e0f                          ; Dead boot-man: 0x0e = black background, yellow foreground
+                                            ; 0x0f = 8 pointed star
     call paint
 .halt:
-    add byte [si + pace_offset], bl
-    mov byte [jump_size], 2
+    add byte [si + pace_offset], bl         ; Update pace counter for a small period of mourning for Boot-Man. 
+                                            ; It was 3, and bl = 0x1b at this point, so it becomes 0x1e
+    mov byte [jump_offset], 2               ; Modify the pace code at the start of this handler, to jump to the
+                                            ; code that re-loads the MBR and re-starts the game
     jmp intxhandler_end
 
     ; Ghosts are invisible
 .ghosts_invisible:
-    dec byte [si + timer_offset]
-    mov ah, 0x0f
-    mov cl, 0x0
+    dec byte [si + timer_offset]            ; Update ghost_timer to limit the period of the ghosts being ethereal
+    mov ah, 0x0f                            ; Update ghost colour to black background, white eyes
+    mov cl, 0x0                             ; Update difference between colours of successive ghosts. Value of 0x0
+                                            ; means all ghosts are the same colour when they are ethereal.
 
 .no_collision:
-    ; Draw the ghosts on the screen
-.ghostdraw:
-    mov dx, [bx + si + gh_offset_pos]
-    call paint
-    add ah, cl            ; Update ghost colour
-    sub bx, gh_length
-    jns .ghostdraw
+.ghostdraw:                                 ; Draw the ghosts on the screen
+    mov dx, [bx + si + gh_offset_pos]       ; dx = new ghost position
+    call paint                              ; show ghost in video ram
+    add ah, cl                              ; Update ghost colour.
+    sub bx, gh_length                       ; Loop over all ghosts
+    jns .ghostdraw                          ; until the final one.
 
-    ; Draw boot-man on the screen
-    mov ax, word 0x0e02
-    mov dx, [si]
-    call paint
+    
+    mov ax, word 0x0e02                     ; Draw boot-man on the screen. 0x0e = black background, yellow foreground
+                                            ; 0x02 = smiley face
+    mov dx, [si]                            ; dx = new Boot-Man position
+    call paint                              ; show Boot-Man
 
 .end:
     jmp intxhandler_end
