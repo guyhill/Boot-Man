@@ -11,4 +11,3 @@ actually boots on all PCs. If it does not on your machine, please let me know an
 about it.
 
 Happy booting!
-Guido
