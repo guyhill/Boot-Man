@@ -12,7 +12,7 @@ about it.
 
 Happy booting!
 
-Edit: I have since tried Boot-Man on a number of other machines, and results have been mixed:
+Edit: I have since tried Boot-Man on a number of different machines, and results have been mixed:
 1. My old Dell Latitude E6220 boots Boot-Man just fine, in Legacy BIOS mode, setting the boot device to "USB storage device". 
 2. My brand-new laptop can only boot in UEFI mode, not in Legacy BIOS mode. So this laptop cannot boot Boot-Man from USB stick.
 3. My primary desktop PC can boot in both UEFI and Legacy modes, and will boot Boot-Man when I specify the boot device as "Legacy / USB Key". If I specify the boot device as some other USB device (USB hard disk, USB FDD, USB CDROM) it does not work.
