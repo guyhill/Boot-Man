@@ -11,3 +11,10 @@ actually boots on all PCs. If it does not on your machine, please let me know an
 about it.
 
 Happy booting!
+
+Edit: I have since tried Boot-Man on a number of other machines, and results have been mixed:
+1. My brand-new laptop can only boot in UEFI mode, not in Legacy BIOS mode. So this laptop cannot boot Boot-Man from USB stick.
+2. My primary desktop PC can boot in both UEFI and Legacy modes, and will boot Boot-Man when I specify the boot device as "Legacy / USB Key". If I specify the boot device as some other USB device (USB hard disk, USB FDD, USB CDROM) it does not work.
+3. My old multi-media laptop can do legacy BIOS boot, but does not have an option to boot from USB Key. I tried booting from USB Disk, USB FDD and USB CDROM but neither of them works.
+
+Legacy BIOS is on its way out (finally, after almost 40 years!) and UEFI is the future. So it seems that the days of Boot-Man are, sadly, numbered.
