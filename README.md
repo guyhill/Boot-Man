@@ -1,6 +1,7 @@
 # Boot-Man
 A bootable Pac-Man clone that fits inside the Master Boot Record
 
+[![Playthrough video](http://img.youtube.com/vi/_QWqwqICaRY/0.jpg)](http://www.youtube.com/watch?v=_QWqwqICaRY "Boot-Man playthrough")
 ![](screenshot.png)
 This tiny version of Pac-Man (only 510 bytes of code) fits inside the Master Boot Record of a USB stick.
 To run it you need a version of [NASM](https://www.nasm.us/) (I used 2.11, newer versions should also work) and either a system emulator
